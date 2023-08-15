@@ -19,6 +19,7 @@ package kubernetes
 import (
 	"encoding/base64"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -40,6 +41,8 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
+	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slices"
 	"golang.org/x/tools/godoc/util"
 	appsv1 "k8s.io/api/apps/v1"
 	api "k8s.io/api/core/v1"
@@ -245,10 +248,10 @@ func (k *Kubernetes) InitConfigMapForEnv(name string, opt kobject.ConvertOptions
 	return configMap
 }
 
-// IntiConfigMapFromFileOrDir will create a configmap from dir or file
+// InitConfigMapFromFileOrDir will create a configmap from dir or file
 // usage:
 //  1. volume
-func (k *Kubernetes) IntiConfigMapFromFileOrDir(name, cmName, filePath string, service kobject.ServiceConfig) (*api.ConfigMap, error) {
+func (k *Kubernetes) InitConfigMapFromFileOrDir(name, cmName, filePath string, service kobject.ServiceConfig) (*api.ConfigMap, map[string]string, error) {
 	configMap := &api.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ConfigMap",
@@ -260,28 +263,35 @@ func (k *Kubernetes) IntiConfigMapFromFileOrDir(name, cmName, filePath string, s
 		},
 	}
 	dataMap := make(map[string]string)
+	pathRemap := make(map[string]string)
 
+	log.Debugf("stat file for ConfigMap %q: %q", cmName, filePath)
 	fi, err := os.Stat(filePath)
 	if err != nil {
-		return nil, err
+		return nil, pathRemap, err
 	}
 
 	switch mode := fi.Mode(); {
 	case mode.IsDir():
-		files, err := os.ReadDir(filePath)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, file := range files {
-			if !file.IsDir() {
-				log.Debugf("Read file to ConfigMap: %s", file.Name())
-				data, err := GetContentFromFile(filePath + "/" + file.Name())
-				if err != nil {
-					return nil, err
-				}
-				dataMap[file.Name()] = data
+		err = fs.WalkDir(os.DirFS(filePath), ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
 			}
+			log.Debugf("Read file to ConfigMap: %s", path)
+			data, err := GetContentFromFile(filepath.Join(filePath, path))
+			if err != nil {
+				return err
+			}
+			key := path
+			if strings.Contains(key, "/") {
+				key = GetMD5Hash(path) + "--" + strings.ReplaceAll(key, "/", "--")
+			}
+			dataMap[key] = data
+			pathRemap[key] = path
+			return nil
+		})
+		if err != nil {
+			return nil, pathRemap, err
 		}
 		initConfigMapData(configMap, dataMap)
 
@@ -289,12 +299,10 @@ func (k *Kubernetes) IntiConfigMapFromFileOrDir(name, cmName, filePath string, s
 		// do file stuff
 		configMap = k.InitConfigMapFromFile(name, service, filePath)
 		configMap.Name = cmName
-		configMap.Annotations = map[string]string{
-			"use-subpath": "true",
-		}
+		pathRemap[filepath.Base(filePath)] = ""
 	}
 
-	return configMap, nil
+	return configMap, pathRemap, nil
 }
 
 // useSubPathMount check if a configmap should be mounted as subpath
@@ -313,7 +321,10 @@ func initConfigMapData(configMap *api.ConfigMap, data map[string]string) {
 	stringData := map[string]string{}
 	binData := map[string][]byte{}
 
-	for k, v := range data {
+	keys := maps.Keys(data)
+	slices.Sort(keys)
+	for _, k := range keys {
+		v := data[k]
 		isText := util.IsText([]byte(v))
 		if isText {
 			stringData[k] = v
@@ -601,8 +612,12 @@ func (k *Kubernetes) CreatePVC(name string, mode string, size string, selectorVa
 		}
 	}
 
-	if mode == "ro" {
+	if mode == "ro" || mode == "rox" {
 		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadOnlyMany}
+	} else if mode == "rwx" {
+		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadWriteMany}
+	} else if mode == "rwop" {
+		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadWriteOncePod}
 	} else {
 		pvc.Spec.AccessModes = []api.PersistentVolumeAccessMode{api.ReadWriteOnce}
 	}
@@ -890,12 +905,19 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	var cms []*api.ConfigMap
 	var volumeName string
 	var subpathName string
+	volumeTypeOverrides := make(map[string]map[string]bool)
+	volumeTypeOverrides["emptyDir"] = make(map[string]bool)
+	volumeTypeOverrides["configMap"] = make(map[string]bool)
+	volumeTypeOverrides["hostPath"] = make(map[string]bool)
+	volumeTypeOverrides["persistentVolumeClaim"] = make(map[string]bool)
 
 	// Set a var based on if the user wants to use empty volumes
 	// as opposed to persistent volumes and volume claims
 	useEmptyVolumes := k.Opt.EmptyVols
 	useHostPath := k.Opt.Volumes == "hostPath"
 	useConfigMap := k.Opt.Volumes == "configMap"
+	useConfigMapForRO := true
+
 	if k.Opt.Volumes == "emptyDir" {
 		useEmptyVolumes = true
 	}
@@ -914,6 +936,14 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		useConfigMap = vt == "configMap"
 	}
 
+	for _, vt := range []string{"emptyDir", "configMap", "hostPath", "persistentVolumeClaim"} {
+		if vols, ok := service.Labels["kompose.volume.overrides."+vt]; ok {
+			for _, vol := range strings.Split(vols, ",") {
+				volumeTypeOverrides[vt][vol] = true
+			}
+		}
+	}
+
 	// config volumes from secret if present
 	secretsVolumeMounts, secretsVolumes := k.ConfigSecretVolumes(name, service)
 	volumeMounts = append(volumeMounts, secretsVolumeMounts...)
@@ -924,12 +954,22 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	for _, volume := range service.Volumes {
 		// check if ro/rw mode is defined, default rw
 		readonly := len(volume.Mode) > 0 && volume.Mode == "ro"
+		actuallyUseEmptyVolumes := useEmptyVolumes
+		actuallyUseConfigMap := useConfigMap
+		actuallyUseHostPath := useHostPath
+
+		if readonly && useConfigMapForRO {
+			actuallyUseEmptyVolumes = false
+			actuallyUseHostPath = false
+			actuallyUseConfigMap = true
+		}
+
 		if volume.VolumeName == "" {
-			if useEmptyVolumes {
+			if actuallyUseEmptyVolumes {
 				volumeName = strings.Replace(volume.PVCName, "claim", "empty", 1)
-			} else if useHostPath {
+			} else if actuallyUseHostPath {
 				volumeName = strings.Replace(volume.PVCName, "claim", "hostpath", 1)
-			} else if useConfigMap {
+			} else if actuallyUseConfigMap {
 				volumeName = strings.Replace(volume.PVCName, "claim", "cm", 1)
 			} else {
 				volumeName = volume.PVCName
@@ -947,35 +987,53 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 			MountPath: volume.Container,
 		}
 
+		actuallyUseEmptyVolumes = (actuallyUseEmptyVolumes || volumeTypeOverrides["emptyDir"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+		actuallyUseConfigMap = (actuallyUseConfigMap || volumeTypeOverrides["configMap"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+		actuallyUseHostPath = (actuallyUseHostPath || volumeTypeOverrides["hostPath"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+
 		// Get a volume source based on the type of volume we are using
 		// For PVC we will also create a PVC object and add to list
 		var volsource *api.VolumeSource
 
-		if useEmptyVolumes {
+		if actuallyUseEmptyVolumes {
 			volsource = k.ConfigEmptyVolumeSource("volume")
-		} else if useHostPath {
+		} else if actuallyUseHostPath {
 			source, err := k.ConfigHostPathVolumeSource(volume.Host)
 			if err != nil {
 				return nil, nil, nil, nil, errors.Wrap(err, "k.ConfigHostPathVolumeSource failed")
 			}
 			volsource = source
-		} else if useConfigMap {
+			if subpathName != "" {
+				volMount.SubPath = subpathName
+			}
+			volumeMounts = append(volumeMounts, volMount)
+		} else if actuallyUseConfigMap && len(volume.Host) > 0 {
 			log.Debugf("Use configmap volume")
-			cm, err := k.IntiConfigMapFromFileOrDir(name, volumeName, volume.Host, service)
+			cm, pathRemap, err := k.InitConfigMapFromFileOrDir(name, volumeName, volume.Host, service)
 			if err != nil {
 				return nil, nil, nil, nil, err
 			}
 			cms = append(cms, cm)
 			volsource = k.ConfigConfigMapVolumeSource(volumeName, volume.Container, cm)
 
-			if useSubPathMount(cm) {
-				volMount.SubPath = volsource.ConfigMap.Items[0].Path
+			keys := maps.Keys(pathRemap)
+			slices.Sort(keys)
+			for _, key := range keys {
+				path := pathRemap[key]
+				volMount := api.VolumeMount{
+					Name:      volumeName,
+					ReadOnly:  readonly,
+					MountPath: filepath.Join(volume.Container, path),
+					SubPath:   key,
+				}
+				volumeMounts = append(volumeMounts, volMount)
 			}
 		} else {
 			volsource = k.ConfigPVCVolumeSource(volumeName, readonly)
 			if volume.VFrom == "" {
 				var storageClassName string
 				defaultSize := PVCRequestSize
+				mode := volume.Mode
 				if k.Opt.PVCRequestSize != "" {
 					defaultSize = k.Opt.PVCRequestSize
 				}
@@ -985,13 +1043,15 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 					for key, value := range service.Labels {
 						if key == "kompose.volume.size" {
 							defaultSize = value
+						} else if key == "kompose.volume.access-mode" {
+							mode = value
 						} else if key == "kompose.volume.storage-class-name" {
 							storageClassName = value
 						}
 					}
 				}
 
-				createdPVC, err := k.CreatePVC(volumeName, volume.Mode, defaultSize, volume.SelectorValue, storageClassName)
+				createdPVC, err := k.CreatePVC(volumeName, mode, defaultSize, volume.SelectorValue, storageClassName)
 
 				if err != nil {
 					return nil, nil, nil, nil, errors.Wrap(err, "k.CreatePVC failed")
@@ -999,11 +1059,11 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 
 				PVCs = append(PVCs, createdPVC)
 			}
+			if subpathName != "" {
+				volMount.SubPath = subpathName
+			}
+			volumeMounts = append(volumeMounts, volMount)
 		}
-		if subpathName != "" {
-			volMount.SubPath = subpathName
-		}
-		volumeMounts = append(volumeMounts, volMount)
 
 		// create a new volume object using the volsource and add to list
 		vol := api.Volume{
@@ -1012,7 +1072,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		}
 		volumes = append(volumes, vol)
 
-		if len(volume.Host) > 0 && (!useHostPath && !useConfigMap) {
+		if len(volume.Host) > 0 && (!useHostPath && !actuallyUseConfigMap) {
 			log.Warningf("Volume mount on the host %q isn't supported - ignoring path on the host", volume.Host)
 		}
 	}

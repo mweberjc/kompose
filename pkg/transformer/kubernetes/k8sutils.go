@@ -18,6 +18,8 @@ package kubernetes
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -897,4 +899,9 @@ func GetContainerArgs(service kobject.ServiceConfig) []string {
 		args = append(args, arg)
 	}
 	return args
+}
+
+func GetMD5Hash(text string) string {
+	hash := md5.Sum([]byte(text))
+	return hex.EncodeToString(hash[:])
 }
