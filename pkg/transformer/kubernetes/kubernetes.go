@@ -928,6 +928,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	volumeTypeOverrides["configMap"] = make(map[string]bool)
 	volumeTypeOverrides["hostPath"] = make(map[string]bool)
 	volumeTypeOverrides["persistentVolumeClaim"] = make(map[string]bool)
+	volumeMapOverrides := make(map[string][]string)
 
 	// Set a var based on if the user wants to use empty volumes
 	// as opposed to persistent volumes and volume claims
@@ -954,6 +955,20 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		useConfigMap = vt == "configMap"
 	}
 
+	for key, label := range service.Labels {
+		if strings.HasPrefix(key, "kompose.volume.map.") {
+			parts := strings.SplitN(label, "=", 2)
+			if len(parts) > 1 {
+				volPath := strings.SplitN(parts[1], ":", 2)
+				if len(volPath) < 2 {
+					volPath = append(volPath, "")
+				}
+				log.Debugf("Map %q: %q => PV %q, SubPath %q", key, parts[0], volPath[0], volPath[1])
+				volumeMapOverrides[parts[0]] = volPath
+			}
+		}
+	}
+
 	for _, vt := range []string{"emptyDir", "configMap", "hostPath", "persistentVolumeClaim"} {
 		if vols, ok := service.Labels["kompose.volume.overrides."+vt]; ok {
 			for _, vol := range strings.Split(vols, ",") {
@@ -967,6 +982,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 	volumeMounts = append(volumeMounts, secretsVolumeMounts...)
 	volumes = append(volumes, secretsVolumes...)
 
+	seenVolumes := make(map[string]bool)
 	var count int
 	//iterating over array of `Vols` struct as it contains all necessary information about volumes
 	for _, volume := range service.Volumes {
@@ -999,15 +1015,26 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		} else {
 			volumeName = volume.VolumeName
 		}
+
 		volMount := api.VolumeMount{
 			Name:      volumeName,
 			ReadOnly:  readonly,
 			MountPath: volume.Container,
 		}
 
-		actuallyUseEmptyVolumes = (actuallyUseEmptyVolumes || volumeTypeOverrides["emptyDir"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
-		actuallyUseConfigMap = (actuallyUseConfigMap || volumeTypeOverrides["configMap"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
-		actuallyUseHostPath = (actuallyUseHostPath || volumeTypeOverrides["hostPath"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+		if volPath, ok := volumeMapOverrides[volume.Container]; ok {
+			log.Debugf("Overriding %q with PVC %q, SubPath %q", volume.Host, volPath[0], volPath[1])
+			actuallyUseEmptyVolumes = false
+			actuallyUseHostPath = false
+			actuallyUseConfigMap = false
+			volumeName = volPath[0]
+			volMount.Name = volPath[0]
+			volMount.SubPath = volPath[1]
+		} else {
+			actuallyUseEmptyVolumes = (actuallyUseEmptyVolumes || volumeTypeOverrides["emptyDir"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+			actuallyUseConfigMap = (actuallyUseConfigMap || volumeTypeOverrides["configMap"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+			actuallyUseHostPath = (actuallyUseHostPath || volumeTypeOverrides["hostPath"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+		}
 
 		// Get a volume source based on the type of volume we are using
 		// For PVC we will also create a PVC object and add to list
@@ -1088,9 +1115,14 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 			Name:         volumeName,
 			VolumeSource: *volsource,
 		}
-		volumes = append(volumes, vol)
 
-		if len(volume.Host) > 0 && (!useHostPath && !actuallyUseConfigMap) {
+		// ! why are volumeMapOverride volumes not deduped elsewhere?
+		if !seenVolumes[volumeName] {
+			seenVolumes[volumeName] = true
+			volumes = append(volumes, vol)
+		}
+
+		if _, ok := volumeMapOverrides[volume.Container]; !ok && len(volume.Host) > 0 && !useHostPath && !actuallyUseConfigMap {
 			log.Warningf("Volume mount on the host %q isn't supported - ignoring path on the host", volume.Host)
 		}
 	}
