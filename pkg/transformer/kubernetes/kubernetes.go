@@ -230,7 +230,20 @@ func (k *Kubernetes) InitConfigMapForEnv(name string, opt kobject.ConvertOptions
 
 	// Remove root pathing
 	// replace all other slashes / periods
+	envFile, err = GetRelativePath(envFile)
+	if err != nil {
+		log.Fatalf("Unable to get relative path: %s", err)
+	}
 	envName := FormatEnvName(envFile)
+
+	labelValue := name + "-" + envName
+	if len(labelValue) > 63 {
+		labelValue = name + "-" + GetMD5Hash(envName)
+	}
+	if len(labelValue) > 63 {
+		labelValue = GetMD5Hash(name + "-" + envName)
+	}
+	label := transformer.ConfigLabels(labelValue)
 
 	// In order to differentiate files, we append to the name and remove '.env' if applicable from the file name
 	configMap := &api.ConfigMap{
@@ -240,7 +253,7 @@ func (k *Kubernetes) InitConfigMapForEnv(name string, opt kobject.ConvertOptions
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   envName,
-			Labels: transformer.ConfigLabels(name + "-" + envName),
+			Labels: label,
 		},
 		Data: envs,
 	}
@@ -264,6 +277,11 @@ func (k *Kubernetes) InitConfigMapFromFileOrDir(name, cmName, filePath string, s
 	}
 	dataMap := make(map[string]string)
 	pathRemap := make(map[string]string)
+
+	filePath, err := GetRelativePath(filePath)
+	if err != nil {
+		return nil, pathRemap, errors.Wrap(err, "Unable to initialize ConfigMap")
+	}
 
 	log.Debugf("stat file for ConfigMap %q: %q", cmName, filePath)
 	fi, err := os.Stat(filePath)
@@ -1160,6 +1178,10 @@ func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]ap
 	if len(service.EnvFile) > 0 {
 		// Load each env_file
 		for _, file := range service.EnvFile {
+			file, err := GetRelativePath(file)
+			if err != nil {
+				return envs, errors.Wrap(err, "Unable to read env_file")
+			}
 			envName := FormatEnvName(file)
 
 			// Load environment variables from file

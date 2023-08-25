@@ -218,6 +218,10 @@ func isPath(substring string) bool {
 
 // ConfigLabels configures label name alone
 func ConfigLabels(name string) map[string]string {
+	if len(name) > 63 {
+		log.Warnf("label too long (> 63): %q", name)
+	}
+
 	return map[string]string{Selector: name}
 }
 

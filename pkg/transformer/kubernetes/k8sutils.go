@@ -905,3 +905,15 @@ func GetMD5Hash(text string) string {
 	hash := md5.Sum([]byte(text))
 	return hex.EncodeToString(hash[:])
 }
+
+func GetRelativePath(path string) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(cwd, path)
+	if err != nil {
+		return "", err
+	}
+	return rel, nil
+}
