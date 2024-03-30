@@ -574,7 +574,7 @@ func dockerComposeToKomposeMapping(composeObject *types.Project) (kobject.Kompos
 					serviceConfig.Port = append(serviceConfig.Port, kobject.Ports{
 						ContainerPort: int32(port.Target),
 						HostPort:      int32(hostPort),
-						Protocol:      port.Protocol,
+						Protocol:      strings.ToUpper(port.Protocol), // XXX why?!
 					})
 				}
 			}
