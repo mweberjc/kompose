@@ -561,6 +561,25 @@ func dockerComposeToKomposeMapping(composeObject *types.Project) (kobject.Kompos
 		// here we will translate `expose` too, they basically means the same thing in kubernetes
 		serviceConfig.Port = loadPorts(composeServiceConfig.Ports, serviceConfig.Expose)
 
+		for key, label := range serviceConfig.Labels {
+			if strings.HasPrefix(key, "kompose.service.port.") {
+				log.Debugf("Port Override %q => %q", key, label)
+				ports, err := types.ParsePortConfig(label)
+				if err != nil {
+					// XXX
+					continue
+				}
+				for _, port := range ports {
+					hostPort, _ := strconv.ParseInt(port.Published, 10, 32)
+					serviceConfig.Port = append(serviceConfig.Port, kobject.Ports{
+						ContainerPort: int32(port.Target),
+						HostPort:      int32(hostPort),
+						Protocol:      port.Protocol,
+					})
+				}
+			}
+		}
+
 		// Parse the volumes
 		// Again, in v3, we use the "long syntax" for volumes in terms of parsing
 		// https://docs.docker.com/compose/compose-file/#long-syntax-3
