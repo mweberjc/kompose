@@ -1,6 +1,7 @@
 #
 # KOMPOSE SPECIFIC
 #
+dist/
 
 # Ignore compiled Kompose files
 kompose

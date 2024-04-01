@@ -1,0 +1,94 @@
+# This is an example .goreleaser.yml file with some sensible defaults.
+# Make sure to check the documentation at https://goreleaser.com
+
+# The lines below are called `modelines`. See `:help modeline`
+# Feel free to remove those if you don't want/need to use them.
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+version: 1
+
+before:
+  hooks:
+    # You may remove this if you don't use go modules.
+    - go mod tidy
+    # you may remove this if you don't need go generate
+    - go generate ./...
+
+release:
+  github:
+    owner: mweberjc
+    name: kompose
+  draft: true
+  prerelease: auto
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    main: main.go
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - arm64
+      - amd64
+    ldflags:
+    - -s -w -X github.com/kubernetes/kompose/pkg/version.GITCOMMIT={{ .ShortCommit }}
+    # Custom build tags templates.
+    tags:
+      - osusergo
+      - netgo
+      - static_build
+      - feature
+
+checksum:
+  algorithm: sha256
+
+archives:
+  - format: tar.gz
+    # this name template makes the OS and Arch compatible with the results of `uname`.
+    name_template: >-
+      {{ .ProjectName }}-
+      {{- tolower .Os }}-
+      {{- if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        format: zip
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+brews:
+  - name: kompose-jumpcloud
+    repository:
+      owner: TheJumpCloud
+      name: homebrew-tap
+      branch: homebrew-{{ .ProjectName }}-{{ .Version }}
+      pull_request:
+        enabled: true
+        base:
+          owner: TheJumpCloud
+          name: homebrew-tap
+          branch: main
+    url_template: "https://github.com/mweberjc/kompose/releases/download/v{{ .Version }}/{{ .ArtifactName }}"
+    folder: Formula
+    homepage: https://github.com/mweberjc/kompose
+    description: A conversion tool for all things compose (namely Docker Compose) to container orchestrators (Kubernetes or OpenShift).
+    test: |
+      system "#{bin}/kompose-jc version"
+    install: |
+      bin.install "kompose" => "kompose-jc"
+    commit_author:
+      name: Michael Weber (bot)
+      email: michael.weber@jumpcloud.com
+    commit_msg_template: "Brew formula update for {{ .ProjectName }} version {{ .Version }}"
+    # skip_upload: auto
+    download_strategy: GitHubPrivateRepositoryReleaseDownloadStrategy
+    custom_require: ../lib/custom_download_strategy.rb
