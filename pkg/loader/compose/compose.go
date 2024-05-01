@@ -347,13 +347,17 @@ func parseHealthCheckReadiness(labels types.Labels) (kobject.HealthCheck, error)
 	}
 
 	if len(test) > 0 {
-		if test[0] == "NONE" {
+		switch test[0] {
+		case "NONE":
 			disable = true
 			test = test[1:]
-		}
-		// Due to docker/cli adding "CMD-SHELL" to the struct, we remove the first element of composeHealthCheck.Test
-		if test[0] == "CMD" || test[0] == "CMD-SHELL" {
+		case "CMD":
 			test = test[1:]
+		case "CMD-SHELL":
+			// Due to docker/cli adding "CMD-SHELL" to the struct, we remove the first element of composeHealthCheck.Test
+			test = append([]string{"/bin/sh", "-c"}, test[1:]...)
+		default:
+			return kobject.HealthCheck{}, fmt.Errorf("unable to parse health check type: %s", test[0])
 		}
 	}
 
@@ -410,7 +414,17 @@ func parseHealthCheck(composeHealthCheck types.HealthCheckConfig, labels types.L
 	}
 
 	if composeHealthCheck.Test != nil {
-		test = composeHealthCheck.Test[1:]
+		test = composeHealthCheck.Test
+		switch test[0] {
+		case "NONE":
+		case "CMD":
+			test = test[1:]
+		case "CMD-SHELL":
+			// Due to docker/cli adding "CMD-SHELL" to the struct, we remove the first element of composeHealthCheck.Test
+			test = append([]string{"/bin/sh", "-c"}, test[1:]...)
+		default:
+			return kobject.HealthCheck{}, fmt.Errorf("unable to parse health check type: %s", test[0])
+		}
 	}
 
 	for key, value := range labels {
