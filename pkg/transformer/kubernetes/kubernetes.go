@@ -17,6 +17,7 @@ limitations under the License.
 package kubernetes
 
 import (
+	"cmp"
 	"encoding/base64"
 	"fmt"
 	"io/fs"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,7 +44,6 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cast"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slices"
 	"golang.org/x/tools/godoc/util"
 	appsv1 "k8s.io/api/apps/v1"
 	api "k8s.io/api/core/v1"
@@ -665,6 +666,16 @@ func ConfigPorts(service kobject.ServiceConfig) []api.ContainerPort {
 		exist[port.ID()] = true
 	}
 
+	slices.SortFunc(ports, func(a, b api.ContainerPort) int {
+		if n := cmp.Compare(a.ContainerPort, b.ContainerPort); n != 0 {
+			return n
+		}
+		if n := cmp.Compare(a.HostPort, b.HostPort); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.Protocol, b.Protocol)
+	})
+
 	return ports
 }
 
@@ -740,6 +751,17 @@ func (k *Kubernetes) ConfigServicePorts(service kobject.ServiceConfig) []api.Ser
 		servicePorts = append(servicePorts, servicePort)
 		seenPorts[int(port.HostPort)] = struct{}{}
 	}
+
+	slices.SortFunc(servicePorts, func(a, b api.ServicePort) int {
+		if n := cmp.Compare(a.Port, b.Port); n != 0 {
+			return n
+		}
+		if n := cmp.Compare(a.Name, b.Name); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.TargetPort.IntVal, b.TargetPort.IntVal)
+	})
+
 	return servicePorts
 }
 
