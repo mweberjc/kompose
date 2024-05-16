@@ -938,16 +938,17 @@ func (k *Kubernetes) getSecretPathsLegacy(secretConfig types.ServiceSecretConfig
 }
 
 // ConfigVolumes configure the container volumes.
-func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) ([]api.VolumeMount, []api.Volume, []*api.PersistentVolumeClaim, []*api.ConfigMap, error) {
+func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) ([]api.VolumeMount, []api.Volume, []*api.PersistentVolumeClaim, []runtime.Object, error) {
 	volumeMounts := []api.VolumeMount{}
 	volumes := []api.Volume{}
 	var PVCs []*api.PersistentVolumeClaim
-	var cms []*api.ConfigMap
+	var objects []runtime.Object
 	var volumeName string
 	var subpathName string
 	volumeTypeOverrides := make(map[string]map[string]bool)
 	volumeTypeOverrides["emptyDir"] = make(map[string]bool)
 	volumeTypeOverrides["configMap"] = make(map[string]bool)
+	volumeTypeOverrides["secret"] = make(map[string]bool)
 	volumeTypeOverrides["hostPath"] = make(map[string]bool)
 	volumeTypeOverrides["persistentVolumeClaim"] = make(map[string]bool)
 	volumeMapOverrides := make(map[string][]string)
@@ -991,7 +992,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		}
 	}
 
-	for _, vt := range []string{"emptyDir", "configMap", "hostPath", "persistentVolumeClaim"} {
+	for _, vt := range []string{"emptyDir", "configMap", "secret", "hostPath", "persistentVolumeClaim"} {
 		if vols, ok := service.Labels["kompose.volume.overrides."+vt]; ok {
 			for _, vol := range strings.Split(vols, ",") {
 				volumeTypeOverrides[vt][vol] = true
@@ -1012,6 +1013,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		readonly := len(volume.Mode) > 0 && volume.Mode == "ro"
 		actuallyUseEmptyVolumes := useEmptyVolumes
 		actuallyUseConfigMap := useConfigMap
+		actuallyUseSecret := false
 		actuallyUseHostPath := useHostPath
 
 		if readonly && useConfigMapForRO {
@@ -1025,6 +1027,8 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 				volumeName = strings.Replace(volume.PVCName, "claim", "empty", 1)
 			} else if actuallyUseHostPath {
 				volumeName = strings.Replace(volume.PVCName, "claim", "hostpath", 1)
+			} else if actuallyUseSecret {
+				volumeName = strings.Replace(volume.PVCName, "claim", "secret", 1)
 			} else if actuallyUseConfigMap {
 				volumeName = strings.Replace(volume.PVCName, "claim", "cm", 1)
 			} else {
@@ -1055,6 +1059,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		} else {
 			actuallyUseEmptyVolumes = (actuallyUseEmptyVolumes || volumeTypeOverrides["emptyDir"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
 			actuallyUseConfigMap = (actuallyUseConfigMap || volumeTypeOverrides["configMap"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
+			actuallyUseSecret = (actuallyUseSecret || volumeTypeOverrides["secret"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
 			actuallyUseHostPath = (actuallyUseHostPath || volumeTypeOverrides["hostPath"][volumeName]) && !volumeTypeOverrides["persistentVolumeClaim"][volumeName]
 		}
 
@@ -1074,13 +1079,54 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 				volMount.SubPath = subpathName
 			}
 			volumeMounts = append(volumeMounts, volMount)
+		} else if actuallyUseSecret && len(volume.Host) > 0 {
+			volumeName = strings.Replace(volume.PVCName, "claim", "secret", 1)
+			log.Debugf("Use secret volume")
+			cm, pathRemap, err := k.InitConfigMapFromFileOrDir(name, volumeName, volume.Host, service)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+
+			data := make(map[string][]byte)
+			for key, value := range cm.Data {
+				data[key] = []byte(value)
+			}
+
+			secret := &api.Secret{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "Secret",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   cm.ObjectMeta.Name,
+					Labels: cm.ObjectMeta.Labels,
+				},
+				Type: api.SecretTypeOpaque,
+				Data: data,
+			}
+
+			objects = append(objects, secret)
+			volsource = k.ConfigSecretVolumeSource(volumeName, volume.Container, secret)
+
+			keys := maps.Keys(pathRemap)
+			slices.Sort(keys)
+			for _, key := range keys {
+				path := pathRemap[key]
+				volMount := api.VolumeMount{
+					Name:      volumeName,
+					ReadOnly:  readonly,
+					MountPath: filepath.Join(volume.Container, path),
+					SubPath:   key,
+				}
+				volumeMounts = append(volumeMounts, volMount)
+			}
 		} else if actuallyUseConfigMap && len(volume.Host) > 0 {
 			log.Debugf("Use configmap volume")
 			cm, pathRemap, err := k.InitConfigMapFromFileOrDir(name, volumeName, volume.Host, service)
 			if err != nil {
 				return nil, nil, nil, nil, err
 			}
-			cms = append(cms, cm)
+			objects = append(objects, cm)
 			volsource = k.ConfigConfigMapVolumeSource(volumeName, volume.Container, cm)
 
 			keys := maps.Keys(pathRemap)
@@ -1149,7 +1195,7 @@ func (k *Kubernetes) ConfigVolumes(name string, service kobject.ServiceConfig) (
 		}
 	}
 
-	return volumeMounts, volumes, PVCs, cms, nil
+	return volumeMounts, volumes, PVCs, objects, nil
 }
 
 // ConfigEmptyVolumeSource is helper function to create an EmptyDir api.VolumeSource
@@ -1191,6 +1237,15 @@ func (k *Kubernetes) ConfigConfigMapVolumeSource(cmName string, targetPath strin
 	}
 	return &api.VolumeSource{
 		ConfigMap: &s,
+	}
+}
+
+// ConfigSecretVolumeSource config a secret to use as volume source
+func (k *Kubernetes) ConfigSecretVolumeSource(secretName string, targetPath string, secret *api.Secret) *api.VolumeSource {
+	s := api.SecretVolumeSource{}
+	s.SecretName = secretName
+	return &api.VolumeSource{
+		Secret: &s,
 	}
 }
 
@@ -1635,7 +1690,7 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 				k.configKubeServiceAndIngressForService(service, name, &objects)
 
 				// Configure the container volumes.
-				volumesMount, volumes, pvc, cms, err := k.ConfigVolumes(name, service)
+				volumesMount, volumes, pvc, objs, err := k.ConfigVolumes(name, service)
 				if err != nil {
 					return nil, errors.Wrap(err, "k.ConfigVolumes failed")
 				}
@@ -1657,8 +1712,8 @@ func (k *Kubernetes) Transform(komposeObject kobject.KomposeObject, opt kobject.
 					objects = append(objects, p)
 				}
 
-				for _, c := range cms {
-					objects = append(objects, c)
+				for _, o := range objs {
+					objects = append(objects, o)
 				}
 
 				podSpec.Append(
