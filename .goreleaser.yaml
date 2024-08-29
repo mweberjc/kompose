@@ -6,7 +6,7 @@
 # yaml-language-server: $schema=https://goreleaser.com/static/schema.json
 # vim: set ts=2 sw=2 tw=0 fo=cnqoj
 
-version: 1
+version: 2
 
 before:
   hooks:
@@ -33,7 +33,7 @@ builds:
       - arm64
       - amd64
     ldflags:
-    - -s -w -X github.com/kubernetes/kompose/pkg/version.GITCOMMIT={{ .ShortCommit }}
+      - -s -w -X github.com/kubernetes/kompose/pkg/version.GITCOMMIT={{ .ShortCommit }}
     # Custom build tags templates.
     tags:
       - osusergo
@@ -78,7 +78,7 @@ brews:
           name: homebrew-tap
           branch: main
     url_template: "https://github.com/mweberjc/kompose/releases/download/v{{ .Version }}/{{ .ArtifactName }}"
-    folder: Formula
+    directory: Formula
     homepage: https://github.com/mweberjc/kompose
     description: A conversion tool for all things compose (namely Docker Compose) to container orchestrators (Kubernetes or OpenShift).
     test: |
