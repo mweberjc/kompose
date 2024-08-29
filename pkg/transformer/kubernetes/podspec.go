@@ -31,7 +31,7 @@ func AddContainer(service kobject.ServiceConfig, opt kobject.ConvertOptions) Pod
 			image = name
 		}
 
-		envs, err := ConfigEnvs(service, opt)
+		envs, envFroms, err := ConfigEnvs(service, opt)
 		if err != nil {
 			panic("Unable to load env variables")
 		}
@@ -40,6 +40,7 @@ func AddContainer(service kobject.ServiceConfig, opt kobject.ConvertOptions) Pod
 			Name:           name,
 			Image:          image,
 			Env:            envs,
+			EnvFrom:        envFroms,
 			Command:        service.Command,
 			Args:           service.Args,
 			WorkingDir:     service.WorkingDir,

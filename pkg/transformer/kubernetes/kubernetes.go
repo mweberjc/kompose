@@ -1276,8 +1276,9 @@ func (k *Kubernetes) ConfigPVCVolumeSource(name string, readonly bool) *api.Volu
 }
 
 // ConfigEnvs configures the environment variables.
-func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]api.EnvVar, error) {
+func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]api.EnvVar, []api.EnvFromSource, error) {
 	envs := transformer.EnvSort{}
+	envFroms := []api.EnvFromSource{}
 
 	keysFromEnvFile := make(map[string]bool)
 
@@ -1289,28 +1290,26 @@ func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]ap
 		for _, file := range service.EnvFile {
 			file, err := GetRelativePath(file)
 			if err != nil {
-				return envs, errors.Wrap(err, "Unable to read env_file")
+				return envs, []api.EnvFromSource{}, errors.Wrap(err, "Unable to read env_file")
 			}
 			envName := FormatEnvName(file)
+
+			envFroms = append(envFroms, api.EnvFromSource{
+				ConfigMapRef: &api.ConfigMapEnvSource{
+					LocalObjectReference: api.LocalObjectReference{
+						Name: envName,
+					},
+				},
+			})
 
 			// Load environment variables from file
 			envLoad, err := GetEnvsFromFile(file)
 			if err != nil {
-				return envs, errors.Wrap(err, "Unable to read env_file")
+				return envs, envFroms, errors.Wrap(err, "Unable to read env_file")
 			}
 
-			// Add configMapKeyRef to each environment variable
+			// Record each environment variable
 			for k := range envLoad {
-				envs = append(envs, api.EnvVar{
-					Name: k,
-					ValueFrom: &api.EnvVarSource{
-						ConfigMapKeyRef: &api.ConfigMapKeySelector{
-							LocalObjectReference: api.LocalObjectReference{
-								Name: envName,
-							},
-							Key: k,
-						}},
-				})
 				keysFromEnvFile[k] = true
 			}
 		}
@@ -1330,7 +1329,7 @@ func ConfigEnvs(service kobject.ServiceConfig, opt kobject.ConvertOptions) ([]ap
 	// we need this because envs are not populated in any random order
 	// this sorting ensures they are populated in a particular order
 	sort.Stable(envs)
-	return envs, nil
+	return envs, envFroms, nil
 }
 
 // ConfigAffinity configures the Affinity.
